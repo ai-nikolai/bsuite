@@ -1,0 +1,5 @@
+bsuite.egg-info
+__pycache__
+logs
+env
+.editor-settings
