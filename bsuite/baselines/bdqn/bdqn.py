@@ -123,38 +123,56 @@ class BayesianDqn(base.Agent):
 
     if self._total_steps % self._sgd_period == 0:
       x0,a0,r1,gamma1,x1  = self._replay.sample(self._batch_size)
-      x0 = tf.convert_to_tensor(x0)
-      r1 = tf.convert_to_tensor(r1)
-      gamma1 = tf.convert_to_tensor(gamma1)
-      a0 = tf.convert_to_tensor(a0)
-      q2 = tf.reduce_max( self._target_network(x1).mean, axis=1) )
-      target_q = r1 + self._discount * gamma1 * q2
-      self._online_network.fit( x0, target_q )
+      target = self._compute_target(r1,gamma1,x1)
+
+      with tf.GradientTape() as tape:
+        q0 = self._compute_prediction(x0,a0)
+        # loss = -tf.reduce_sum( q0.log_prob(target) ) #q0 is not a distribution
+        td_error = target - q0
+        loss = tf.reduce_sum( tf.square(td_error) )
+
+      gradients = tape.gradient(loss, self._online_network.trainable_variables)
+      self._optimizer.apply_gradients(zip(gradients, self._online_network.trainable_variables))
 
     if self._total_steps % self._target_update_period == 0:
       self._update_target_nets()
 
-    def _qlearning(self, r1, gamma1, x1):
-      """Does the q learning step"""
-      # Q-learning op.
-      q2 = tf.reduce_max( self._target_network(x1).mean, axis=1) )
-      r1 = tf.convert_to_tensor(r1)
-      gamma1 = tf.convert_to_tensor(gamma1)
+  def _compute_target(self, r1, gamma1, x1):
+    """Computes the target Q of a probabilistic network"""
+    q1 = tf.reduce_max( self._target_network(x1).mean(), axis=1 )
+    r1 = tf.convert_to_tensor(r1)
+    gamma1 = tf.convert_to_tensor(gamma1)
+    target = r1 + gamma1 * self._discount * q1
+    return target
 
-      # Build target and select head to update.
-      target = tf.stop_gradient(
-      r_t + pcont_t * tf.reduce_max(q_t, axis=1))
-      qa_tm1 = indexing_ops.batched_index(q_tm1, a_tm1)
+  def _compute_prediction(self, x0, a0):
+    """Computes the Q of the online probabilistic network"""
+    q0 = self._online_network(x0).mean()
+    qa0 = batched_index(q0, a0)
+    return qa0
 
-      # Temporal difference error and loss.
-      # Loss is MSE scaled by 0.5, so the gradient is equal to the TD error.
-      td_error = target - qa_tm1
-      loss = 0.5 * tf.square(td_error)
-      return base_ops.LossOutput(loss, QExtra(target, td_error))
+  def _update_target_nets(self):
+    """Updates the target network from the online network"""
+    self._target_network.set_weights(self._online_network.get_weights())
+    
+    # def _bayes_qlearning_training_step(self, x0, a1, r1, gamma1, x1):
+    #   """Does the q learning step"""
+    #   # Q-learning op.
+    #   q2 = tf.reduce_max( self._target_network(x1).mean, axis=1) )
+    #   r1 = tf.convert_to_tensor(r1)
+    #   gamma1 = tf.convert_to_tensor(gamma1)
+    #
+    #   # Build target and select head to update.
+    #   r_t + pcont_t * tf.reduce_max(q_t, axis=1)
+    #   qa_tm1 = indexing_ops.batched_index(q_tm1, a_tm1)
+    #
+    #   # Temporal difference error and loss.
+    #   # Loss is MSE scaled by 0.5, so the gradient is equal to the TD error.
+    #   td_error = target - qa_tm1
+    #   loss = 0.5 * tf.square(td_error)
+    #   return loss
 
-    def _update_target_nets(self):
-      """Updates the target network from the online network"""
-      self._target_network.set_weights(self._online_network.get_weights())
+
 
 
 TransitionWithMaskAndNoise = collections.namedtuple(
@@ -182,11 +200,9 @@ class BayesianMLP(tf.keras.Model):
 
     self._model = tf.keras.Sequential([
         BatchFlatten(),
-        tf.keras.layers.Dense(
-            tfp.layers.MultivariateNormalTriL.params_size(self._output_sizes),
-            activation=tf.nn.relu
-        ),
-        tfp.layers.MultivariateNormalTriL(self._output_sizes, dtype='float32'),
+        tf.keras.layers.Dense(32, activation="relu"),
+        tf.keras.layers.Dense(tfp.layers.MultivariateNormalTriL.params_size(self._output_sizes)),
+        tfp.layers.MultivariateNormalTriL(self._output_sizes)
     ])
 
   def call(self, inputs):
@@ -215,14 +231,16 @@ def batched_index(values, indices):
     statically (i.e. during graph construction), and those sizes are not
     compatible (see shape descriptions in Args list above).
   """
-  with tf.name_scope("batch_indexing", values=[values, indices]):
-    values = tf.convert_to_tensor(values)
-    indices = tf.convert_to_tensor(indices)
-    assert_compatible_shapes(values.shape, indices.shape)
+  values = tf.convert_to_tensor(values)
+  indices = tf.convert_to_tensor(indices)
 
-    one_hot_indices = tf.one_hot(
-        indices, tf.shape(values)[-1], dtype=values.dtype)
-    return tf.reduce_sum(values * one_hot_indices, axis=-1)
+  one_hot_indices = tf.one_hot(
+    indices,
+    tf.shape(values)[-1],
+    dtype=values.dtype
+  )
+
+  return tf.reduce_sum(values * one_hot_indices, axis=-1)
 
 
 

@@ -57,6 +57,7 @@ flags.DEFINE_boolean('verbose', True, 'whether to log to std output')
 FLAGS = flags.FLAGS
 
 
+tf.keras.backend.set_floatx('float64')
 
 
 def run(bsuite_id: Text) -> Text:
