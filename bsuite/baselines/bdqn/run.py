@@ -24,7 +24,7 @@ from bsuite import bsuite
 from bsuite import sweep
 
 from bsuite.baselines import experiment
-from bsuite.baselines.bdqn import bdqn
+from bsuite.baselines.bdqn import bdqn2 as bdqn
 from bsuite.baselines.utils import pool
 
 import tensorflow as tf
