@@ -65,50 +65,76 @@ class BayesianDqn(base.Agent):
       sgd_period: int,
       target_update_period: int,
       optimizer: tf.keras.optimizers.Optimizer,
+      posterior_optimizer: tf.optimizers.Optimizer = tf.optimizers.SGD(learning_rate=1e-2),
       seed: int = None,
   ):
     """A simple DQN agent."""
-    # tf.keras.backend.set_floatx('float32')
-
     # DQN configuration and hyperparameters.
+    self._num_features = 32
     self._num_actions = action_spec.num_values
     self._discount = discount
     self._batch_size = batch_size
-    self._sgd_period = sgd_period
-    self._target_update_period = target_update_period
     self._optimizer = optimizer
+    self._posterior_optimizer = posterior_optimizer
     self._total_steps = 0
     self._total_episodes = 0
     self._replay = replay.Replay(capacity=replay_capacity)
     self._min_replay_size = min_replay_size
-    tf.random.set_seed(seed)
-    self._rng = np.random.RandomState(seed)
 
+    #time periods for updating
+    self._sgd_period = sgd_period #the paper 4
+    self._target_update_period = target_update_period #the paper 10000 (10k)
+    self._posterior_update_period = 200 #the paper 100000 (100k)
+    self._sample_out_mus_period = 2 #the paper 1000 (1k)
+
+    #neural network for the features
     self._online_network = online_network
     self._target_network = target_network
 
-    negloglik = lambda y, model: -model.log_prob(y)
-    self._online_network.compile(optimizer=self._optimizer, loss=negloglik)
+    # normal output distribution
+    self._target_mus = []
+    self._target_covs = []
+    self._normal_distros = []
+    self._out_mus = []
+    eye = tf.eye(self._num_features)
+    for idx in range(self._num_actions):
+      mu = tf.Variable(tf.random.normal([self._num_features]), name="mu"+str(idx)) #needs size: num_features
+      cov = tf.random.normal([self._num_features, self._num_features], stddev=0.1) + eye #needs size: num_features x num_features
+      cov = tf.linalg.band_part(cov,0,-1) #upper triangular
+      cov = 0.5 * (cov + tf.transpose(cov) ) #make it symmetric
+      cov = tf.Variable(cov, name="cov"+str(idx))
+      normal_distro = tfpl.DistributionLambda(
+        tfp.distributions.MultivariateNormalFullCovariance(
+          loc=mu,
+          covariance_matrix=cov
+        )
+      )
+      self._target_mus.append(mu)
+      self._target_covs.append(cov)
+      self._normal_distros.append(normal_distro)
+      self._out_mus.append( normal_distro.sample() )
 
+    # setting unified keras backend
+    tf.keras.backend.set_floatx('float32')
 
   def policy(self, timestep: dm_env.TimeStep) -> int:
     """Select actions according to epsilon-greedy policy."""
     batched_obs = np.expand_dims(timestep.observation, axis=0)
-    q_values = tf.squeeze(self._online_network(batched_obs).sample())
+    q_values = self._compute_online_q(batched_obs)
     action = np.argmax(q_values)
-
     return np.int32(action)
-
 
   def update(self,
              old_step: dm_env.TimeStep,
              action: int,
              new_step: dm_env.TimeStep):
     """Takes in a transition from the environment."""
+    #counting
     self._total_steps += 1
     if new_step.last():
       self._total_episodes += 1
 
+    #adding data to the replay buffer
     if not old_step.last():
       self._replay.add(TransitionWithMaskAndNoise(
           x0=old_step.observation,
@@ -118,62 +144,91 @@ class BayesianDqn(base.Agent):
           x1=new_step.observation,
       ))
 
+    # Keep gathering data
     if self._replay.size < self._min_replay_size:
       return
 
+    #training step
     if self._total_steps % self._sgd_period == 0:
       x0,a0,r1,gamma1,x1  = self._replay.sample(self._batch_size)
       target = self._compute_target(r1,gamma1,x1)
-
       with tf.GradientTape() as tape:
         q0 = self._compute_prediction(x0,a0)
         # loss = -tf.reduce_sum( q0.log_prob(target) ) #q0 is not a distribution
         td_error = target - q0
         loss = tf.reduce_sum( tf.square(td_error) )
-
       gradients = tape.gradient(loss, self._online_network.trainable_variables)
       self._optimizer.apply_gradients(zip(gradients, self._online_network.trainable_variables))
 
+    #calculating posterior
+    if self._total_steps % self._posterior_update_period == 0:
+      self._compute_posterior()
+
+    #sampling new out weights (mus)
+    if self._total_steps % self._sample_out_mus_period == 0:
+      self._sample_out_mus()
+
+    #updating nets
     if self._total_steps % self._target_update_period == 0:
       self._update_target_nets()
 
+  @tf.function
+  def _compute_online_q(self, x0):
+    """ Computes the value for each action in x0 batch. """
+    features = self._online_network(x0)
+    action_weights = tf.stack(self._out_mus) # num_actions x num_features
+    q0 = features @ tf.transpose(action_weights)
+    return q0
+
+  @tf.function
+  def _sample_out_mus(self):
+    """ Samples the out_mus. """
+    for idx in range(self._num_actions):
+      self._out_mus[idx] = self._normal_distros[idx].sample()
+
+  @tf.function
   def _compute_target(self, r1, gamma1, x1):
-    """Computes the target Q of a probabilistic network"""
-    q1 = tf.reduce_max( self._target_network(x1).mean(), axis=1 )
-    r1 = tf.convert_to_tensor(r1)
-    gamma1 = tf.convert_to_tensor(gamma1)
+    """Computes the target Q of the target network. """
+    features = self._target_network(x1)
+    action_weights = tf.stack(self._target_mus) # num_actions x num_features
+    q1 = tf.reduce_max( features @ tf.transpose(action_weights), axis=1 )
+    r1 = tf.cast( tf.convert_to_tensor(r1), tf.float32 )
+    gamma1 = tf.cast( tf.convert_to_tensor(gamma1), tf.float32 )
     target = r1 + gamma1 * self._discount * q1
     return target
 
+  @tf.function
   def _compute_prediction(self, x0, a0):
-    """Computes the Q of the online probabilistic network"""
-    q0 = self._online_network(x0).mean()
-    qa0 = batched_index(q0, a0)
+    """Computes the Q of the online network. """
+    features = self._online_network(x0) # batch x num_features
+    action_weights = tf.stack(self._out_mus) # num_actions x num_features
+    # a0 =  tf.convert_to_tensor(a0)
+    batched_action_vectors = tf.gather(action_weights, a0) #batch x num_features
+    qa0 = tf.reduce_sum( tf.multiply(batched_action_vectors, features), axis=1 )
     return qa0
 
+  # @tf.function
+  def _compute_posterior(self):
+    """ Computes the posterior on w and updates mu list. """
+    x0,a0,r1,gamma1,x1 = self._replay.sample(self._batch_size)
+    for idx in range(self._num_actions):
+      mask = a0==idx
+      mask = tf.convert_to_tensor(mask)
+      mask = tf.cast(mask, tf.int32)
+      x0a = tf.gather(x0,mask) #extracts only the x where a0==action
+      phi = self._online_network(x0a)
+      #approximate posterior update
+      with tf.GradientTape() as tape:
+        tape.watch(self._normal_distros[idx].variables)
+        loss = -tf.reduce_sum( self._normal_distros[idx].log_prob(phi) )
+      print(loss)
+      gradients = tape.gradient(loss, self._normal_distros[idx].variables)
+      print(gradients)
+      self._optimizer.apply_gradients(zip(gradients, self._normal_distros[idx].variables))
+
   def _update_target_nets(self):
-    """Updates the target network from the online network"""
+    """Updates the target network from the online network. """
     self._target_network.set_weights(self._online_network.get_weights())
-    
-    # def _bayes_qlearning_training_step(self, x0, a1, r1, gamma1, x1):
-    #   """Does the q learning step"""
-    #   # Q-learning op.
-    #   q2 = tf.reduce_max( self._target_network(x1).mean, axis=1) )
-    #   r1 = tf.convert_to_tensor(r1)
-    #   gamma1 = tf.convert_to_tensor(gamma1)
-    #
-    #   # Build target and select head to update.
-    #   r_t + pcont_t * tf.reduce_max(q_t, axis=1)
-    #   qa_tm1 = indexing_ops.batched_index(q_tm1, a_tm1)
-    #
-    #   # Temporal difference error and loss.
-    #   # Loss is MSE scaled by 0.5, so the gradient is equal to the TD error.
-    #   td_error = target - qa_tm1
-    #   loss = 0.5 * tf.square(td_error)
-    #   return loss
-
-
-
 
 TransitionWithMaskAndNoise = collections.namedtuple(
     'TransitionWithMaskAndNoise',
@@ -191,25 +246,40 @@ class BatchFlatten(tf.keras.Model):
     return outputs
 
 
-class BayesianMLP(tf.keras.Model):
+class MLP(tf.keras.Model):
   """A simple multilayer perceptron which flattens all non-batch dimensions."""
 
   def __init__(self, output_sizes):
-    super(BayesianMLP, self).__init__()
+    super(MLP, self).__init__()
     self._output_sizes = output_sizes
 
     self._model = tf.keras.Sequential([
         BatchFlatten(),
         tf.keras.layers.Dense(32, activation="relu"),
-        tf.keras.layers.Dense(tfp.layers.MultivariateNormalTriL.params_size(self._output_sizes)),
-        tfp.layers.MultivariateNormalTriL(self._output_sizes)
+        tf.keras.layers.Dense(self._output_sizes),
     ])
 
   def call(self, inputs):
     outputs = self._model(inputs)
     return outputs
 
-
+# class BayesianMLP(tf.keras.Model):
+#   """A simple multilayer perceptron which flattens all non-batch dimensions."""
+#
+#   def __init__(self, output_sizes):
+#     super(BayesianMLP, self).__init__()
+#     self._output_sizes = output_sizes
+#
+#     self._model = tf.keras.Sequential([
+#         BatchFlatten(),
+#         tf.keras.layers.Dense(32, activation="relu"),
+#         tf.keras.layers.Dense(tfp.layers.MultivariateNormalTriL.params_size(self._output_sizes)),
+#         tfp.layers.MultivariateNormalTriL(self._output_sizes)
+#     ])
+#
+#   def call(self, inputs):
+#     outputs = self._model(inputs)
+#     return outputs
 
 
 def batched_index(values, indices):
@@ -248,8 +318,9 @@ def batched_index(values, indices):
 def default_agent(obs_spec: dm_env.specs.Array,
                   action_spec: dm_env.specs.DiscreteArray) -> BayesianDqn:
   """Initialize a Bootstrapped DQN agent with default parameters."""
-  online_network = BayesianMLP(output_sizes)
-  target_network = BayesianMLP(output_sizes)
+  num_features = 32
+  online_network = MLP(num_features)
+  target_network = MLP(num_features)
   return BayesianDqn(
       obs_spec=obs_spec,
       action_spec=action_spec,

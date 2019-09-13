@@ -57,7 +57,7 @@ flags.DEFINE_boolean('verbose', True, 'whether to log to std output')
 FLAGS = flags.FLAGS
 
 
-tf.keras.backend.set_floatx('float64')
+# tf.keras.backend.set_floatx('float64')
 
 
 def run(bsuite_id: Text) -> Text:
@@ -69,9 +69,9 @@ def run(bsuite_id: Text) -> Text:
       logging_mode=FLAGS.logging_mode,
       overwrite=FLAGS.overwrite,
   )
-
-  online_network = bdqn.BayesianMLP(env.action_spec().num_values)
-  target_network = bdqn.BayesianMLP(env.action_spec().num_values)
+  num_features = 32 #fixed param now, TODO: needs clean up
+  online_network = bdqn.MLP(32)
+  target_network = bdqn.MLP(32)
 
 
   agent = bdqn.BayesianDqn(
