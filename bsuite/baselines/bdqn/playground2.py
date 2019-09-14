@@ -75,7 +75,7 @@ class BayesianMLP2(tf.keras.Model):
         tf.keras.layers.Dense(tfp.layers.MultivariateNormalTriL.params_size(self._output_sizes)),
         tfp.layers.MultivariateNormalTriL(self._output_sizes)
     ])
-
+    
   def call(self, inputs):
     outputs = self._model(inputs)
     return outputs
@@ -118,6 +118,7 @@ if __name__=="__main__":
 
     y = tf.convert_to_tensor(y)
 
+    print(model2)
     #prediction
     with tf.GradientTape() as tape:
         y_hat = model2(x)

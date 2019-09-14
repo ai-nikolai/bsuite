@@ -103,11 +103,9 @@ class BayesianDqn(base.Agent):
       cov = tf.linalg.band_part(cov,0,-1) #upper triangular
       cov = 0.5 * (cov + tf.transpose(cov) ) #make it symmetric
       cov = tf.Variable(cov, name="cov"+str(idx))
-      normal_distro = tfpl.DistributionLambda(
-        tfp.distributions.MultivariateNormalFullCovariance(
+      normal_distro = tfp.distributions.MultivariateNormalFullCovariance(
           loc=mu,
           covariance_matrix=cov
-        )
       )
       self._target_mus.append(mu)
       self._target_covs.append(cov)
@@ -207,7 +205,7 @@ class BayesianDqn(base.Agent):
     qa0 = tf.reduce_sum( tf.multiply(batched_action_vectors, features), axis=1 )
     return qa0
 
-  # @tf.function
+  @tf.function
   def _compute_posterior(self):
     """ Computes the posterior on w and updates mu list. """
     x0,a0,r1,gamma1,x1 = self._replay.sample(self._batch_size)
@@ -219,12 +217,17 @@ class BayesianDqn(base.Agent):
       phi = self._online_network(x0a)
       #approximate posterior update
       with tf.GradientTape() as tape:
-        tape.watch(self._normal_distros[idx].variables)
-        loss = -tf.reduce_sum( self._normal_distros[idx].log_prob(phi) )
-      print(loss)
-      gradients = tape.gradient(loss, self._normal_distros[idx].variables)
-      print(gradients)
-      self._optimizer.apply_gradients(zip(gradients, self._normal_distros[idx].variables))
+        normal_distro = tfp.distributions.MultivariateNormalFullCovariance(
+                  loc=self._target_mus[idx],
+                  covariance_matrix=self._target_covs[idx]
+        )
+        # loss = -tf.reduce_sum( self._normal_distros[idx].log_prob(phi) )
+        loss = -tf.reduce_sum( normal_distro.log_prob(phi) )
+
+      # gradients = tape.gradient(loss, self._normal_distros[idx].variables)
+      gradients = tape.gradient(loss, normal_distro.variables)
+      # self._optimizer.apply_gradients(zip(gradients, self._normal_distros[idx].variables))
+      self._optimizer.apply_gradients(zip(gradients, normal_distro.variables))
 
   def _update_target_nets(self):
     """Updates the target network from the online network. """

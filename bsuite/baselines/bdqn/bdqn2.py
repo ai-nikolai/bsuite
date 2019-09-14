@@ -84,8 +84,8 @@ class BayesianDqn(base.Agent):
     #time periods for updating
     self._sgd_period = sgd_period #the paper 4
     self._target_update_period = target_update_period #the paper 10000 (10k)
-    self._posterior_update_period = 2000 #the paper 100000 (100k)
-    self._sample_out_mus_period = 4 #the paper 1000 (1k)
+    self._posterior_update_period = 500 #the paper 100000 (100k)
+    self._sample_out_mus_period = 20 #the paper 1000 (1k)
 
     #neural network for the features
     self._online_network = online_network
@@ -227,8 +227,8 @@ class BayesianDqn(base.Agent):
       with tf.GradientTape() as tape:
         normal_distro = self._normal_distros[idx](self._target_mu_covs[idx])
         loss = -tf.reduce_sum( normal_distro.log_prob(phi) )
-      gradients = tape.gradient(loss, normal_distro.variables)
-      self._optimizer.apply_gradients(zip(gradients, normal_distro.variables))
+      gradients = tape.gradient(loss, [self._target_mu_covs[idx]])
+      self._optimizer.apply_gradients(zip(gradients, [self._target_mu_covs[idx]]))
     #need to update all the target mus
     self._get_target_mus()
 

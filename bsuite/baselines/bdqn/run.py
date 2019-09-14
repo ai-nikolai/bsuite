@@ -111,6 +111,8 @@ def main(argv):
     bsuite_sweep = getattr(sweep, bsuite_id)
     print('Running a sweep over bsuite_id in sweep.{}'.format(bsuite_sweep))
     FLAGS.verbose = False
+    # for b_id in bsuite_sweep:
+    #   run(b_id)
     pool.map_mpi(run, bsuite_sweep)
 
   else:
